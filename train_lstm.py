@@ -7,8 +7,8 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 
 # Config
-READ_API_KEY = '08FH22E6WVOV82J9'
-READ_CHANNEL_ID = '2797136'
+READ_API_KEY = '60SQCX95B7XKZN2E'
+READ_CHANNEL_ID = '2692605'
 WRITE_API_KEY = 'IXTWUKUQDPJ5KIOH'
 PREDICT_LENGTH = 5
 SEQ_LENGTH = 15
