@@ -6,49 +6,67 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 
-# Config
+# === Configuration ===
 READ_API_KEY = '60SQCX95B7XKZN2E'
 READ_CHANNEL_ID = '2692605'
 WRITE_API_KEY = 'IXTWUKUQDPJ5KIOH'
-PREDICT_LENGTH = 5
 SEQ_LENGTH = 15
 
-# Fetch last 20 temperature readings
-url = f"https://api.thingspeak.com/channels/{READ_CHANNEL_ID}/fields/1.json?api_key={READ_API_KEY}&results=20"
+# === Step 1: Fetch last 40 temperature readings ===
+url = f"https://api.thingspeak.com/channels/{READ_CHANNEL_ID}/fields/1.json?api_key={READ_API_KEY}&results=40"
 response = requests.get(url)
 data = response.json()
 temps = [float(entry['field1']) for entry in data['feeds'] if entry['field1'] is not None]
 
-if len(temps) < 20:
-    raise ValueError("Not enough data to train.")
+if len(temps) < 25:
+    raise ValueError("❌ Not enough data to train.")
 
-# Normalize
+# === Step 2: Basic Cleaning ===
+temps = np.array(temps)
+temps = temps[temps > 0]               # Remove 0s
+temps = temps[~np.isnan(temps)]        # Remove NaN
+
+# === Step 3: Remove Outliers (Z-score filtering) ===
+z = np.abs((temps - np.mean(temps)) / np.std(temps))
+temps_clean = temps[z < 2]             # Keep within ±2 std
+
+if len(temps_clean) < SEQ_LENGTH + 1:
+    raise ValueError("❌ Not enough clean data after removing outliers.")
+
+# === Step 4: Normalize ===
 scaler = MinMaxScaler()
-temps_scaled = scaler.fit_transform(np.array(temps).reshape(-1, 1))
+temps_scaled = scaler.fit_transform(temps_clean.reshape(-1, 1))
 
-# Prepare data
-X, y = [], []
-for i in range(len(temps_scaled) - SEQ_LENGTH - PREDICT_LENGTH + 1):
+# === Step 5: Prepare Sequences ===
+X = []
+for i in range(len(temps_scaled) - SEQ_LENGTH):
     X.append(temps_scaled[i:i+SEQ_LENGTH])
-    y.append(temps_scaled[i+SEQ_LENGTH:i+SEQ_LENGTH+PREDICT_LENGTH].reshape(-1))
-X, y = np.array(X), np.array(y)
+X = np.array(X)
 
-# Define model
+y = temps_scaled[SEQ_LENGTH:]
+
+# === Step 6: Define and Train Model ===
 model = Sequential([
     LSTM(64, input_shape=(SEQ_LENGTH, 1)),
-    Dense(PREDICT_LENGTH)
+    Dense(1)
 ])
 model.compile(optimizer='adam', loss='mse')
 model.fit(X, y, epochs=100, verbose=0)
 
-# Predict next 5 steps
+# === Step 7: Predict the next time step ===
 last_seq = temps_scaled[-SEQ_LENGTH:].reshape(1, SEQ_LENGTH, 1)
 pred_scaled = model.predict(last_seq)
-pred = scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
+pred = scaler.inverse_transform(pred_scaled)[0][0]
 
-# Send to ThingSpeak
-base_url = f"https://api.thingspeak.com/update?api_key={WRITE_API_KEY}"
-fields = ''.join([f"&field{i+1}={pred[i]:.2f}" for i in range(PREDICT_LENGTH)])
-send_url = base_url + fields
-resp = requests.get(send_url)
-print("Updated ThingSpeak with prediction:", resp.status_code)
+# === Step 8: Anomaly Detection ===
+last_actual = scaler.inverse_transform([temps_scaled[-1]])[0][0]
+residual = abs(pred - last_actual)
+res_mean = np.mean(np.abs(scaler.inverse_transform(y) - scaler.inverse_transform(model.predict(X)).flatten()))
+res_std = np.std(np.abs(scaler.inverse_transform(y) - scaler.inverse_transform(model.predict(X)).flatten()))
+z_score = (residual - res_mean) / res_std
+is_anomaly = int(abs(z_score) > 2)
+
+# === Step 9: Send Prediction and Anomaly Flag to ThingSpeak ===
+url = f"https://api.thingspeak.com/update?api_key={WRITE_API_KEY}&field1={pred:.2f}&field2={is_anomaly}"
+resp = requests.get(url)
+print("✅ LSTM Prediction: {:.2f} | Anomaly: {} | HTTP Status: {}".format(pred, is_anomaly, resp.status_code))
